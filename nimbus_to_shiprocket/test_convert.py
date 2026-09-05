@@ -98,6 +98,68 @@ class ConvertRowTests(unittest.TestCase):
         self.assertEqual(r["CRF ID"], "R1")
 
 
+class XlsxTests(unittest.TestCase):
+    def _write_xlsx(self, path, header, rows):
+        """Minimal .xlsx writer (inline strings + numbers) for tests."""
+        import zipfile
+        from xml.sax.saxutils import escape
+
+        def col(i):
+            s = ""
+            i += 1
+            while i:
+                i, r = divmod(i - 1, 26)
+                s = chr(65 + r) + s
+            return s
+
+        def cell(ref, v):
+            if isinstance(v, (int, float)):
+                return f'<c r="{ref}"><v>{v}</v></c>'
+            return f'<c r="{ref}" t="inlineStr"><is><t>{escape(str(v))}</t></is></c>'
+
+        xml_rows = []
+        for r_idx, row in enumerate([header] + rows, start=1):
+            cells = "".join(cell(f"{col(c)}{r_idx}", v) for c, v in enumerate(row) if v != "")
+            xml_rows.append(f'<row r="{r_idx}">{cells}</row>')
+        ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        rns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("xl/workbook.xml",
+                       f'<workbook xmlns="{ns}" xmlns:r="{rns}"><sheets>'
+                       f'<sheet name="Orders" sheetId="1" r:id="rId1"/></sheets></workbook>')
+            z.writestr("xl/_rels/workbook.xml.rels",
+                       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                       '<Relationship Id="rId1" Type="x" Target="worksheets/sheet1.xml"/></Relationships>')
+            z.writestr("xl/worksheets/sheet1.xml",
+                       f'<worksheet xmlns="{ns}"><sheetData>{"".join(xml_rows)}</sheetData></worksheet>')
+
+    def test_read_xlsx_numbers_dates_and_mojibake(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "n.xlsx")
+            self._write_xlsx(path, ["Order Date", "AWB", "Charged Weight", "Name", "Pincode"],
+                             [[46260, 372125664635, 0.22900000000000001, "InstaTuck\u00e2\u201e\u00a2 Beige", 110042]])
+            header, rows = convert.read_xlsx(path)
+            self.assertEqual(header, ["Order Date", "AWB", "Charged Weight", "Name", "Pincode"])
+            self.assertEqual(rows[0]["AWB"], "372125664635")          # no 3.72E+11
+            self.assertEqual(rows[0]["Charged Weight"], "0.229")       # no float noise
+            self.assertEqual(rows[0]["Name"], "InstaTuck\u2122 Beige")  # mojibake undone
+            self.assertEqual(convert.nimbus_date(rows[0]["Order Date"]), "2026-08-26 00:00:00")
+            self.assertEqual(convert.nimbus_date(rows[0]["Pincode"]), "110042")  # not a date
+
+    def test_repair_edited_header(self):
+        header = list(convert.NIMBUS_COLUMNS)
+        header[2] = "x"  # someone typed over 'Channel Name' in Excel
+        rows = [{h: "" for h in header}]
+        rows[0]["x"] = "Shopify"
+        fixed_header, fixed_rows = convert.repair_nimbus_header(header, rows)
+        self.assertEqual(fixed_header, convert.NIMBUS_COLUMNS)
+        self.assertEqual(fixed_rows[0]["Channel Name"], "Shopify")
+
+    def test_repair_leaves_foreign_layout_alone(self):
+        header, rows = convert.repair_nimbus_header(["a", "b"], [{"a": "1", "b": "2"}])
+        self.assertEqual(header, ["a", "b"])
+
+
 class EndToEndTests(unittest.TestCase):
     def _write(self, path, columns, rows):
         with open(path, "w", newline="", encoding="utf-8") as fh:

@@ -25,6 +25,7 @@ Usage:
     python convert.py --nimbus nimbus.csv -o nimbus_as_shiprocket.csv     # convert only
     python convert.py --nimbus nimbus.csv --shiprocket shiprocket.csv --in-place
 
+Both inputs may be .csv or .xlsx (the format Nimbus/Shiprocket download as).
 Only the Python standard library is used; no installs needed.
 """
 
@@ -33,9 +34,12 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import re
 import sys
 import tempfile
-from datetime import datetime
+import zipfile
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
 
 # --------------------------------------------------------------------------- #
 # Shiprocket report layout (118 columns, in order).  Taken verbatim from a real
@@ -75,6 +79,60 @@ SHIPROCKET_COLUMNS = [
     "Lost Date", "Latest OFD Date", "Master Courier", "Is Reverse",
     "Promise EDD", "Updated New EDD", "Exchange Order Type",
     "Cancellation Reason",
+]
+
+# Nimbus Post order_b2c_report layout (145 columns).  Used to recover the
+# column names when a header cell has been edited by hand in Excel.
+NIMBUS_COLUMNS = [
+    "Order Date", "Order ID", "Channel Name", "Pickup Address ID",
+    "Pickup Warehouse Address", "RTO Warehouse Address",
+    "Is Document (Yes/No)", "Payment Method (COD/Prepaid)",
+    "Buyer's Full Name", "Buyer's Email", "Buyer's Mobile No.",
+    "Shipping Complete Address", "Shipping Address Landmark",
+    "Shipping Address State", "Shipping Address City",
+    "Shipping Address Pincode", "Billing Full Name", "Billing Email",
+    "Billing Mobile No.", "Billing Complete Address", "Billing Landmark",
+    "Billing State", "Billing City", "Billing Pincode", "Order Tags",
+    "Reseller Name", "Shipment Weight (Kgs)", "Shipment Length (cm)",
+    "Shipment Breadth (cm)", "Shipment Height (cm)", "Partial COD (Yes/No)",
+    "Collectable Amount", "Shipping Charges", "COD Charges", "Total Discount",
+    "Other Charges", "Verified Order (Yes/No)", "Product SKU (1)",
+    "Product Name (1)*", "Product Quantity (1)*", "Product Unit Price (1)*",
+    "Product Discount (1)", "Product HSN Code (1)", "Product Tax % (1)",
+    "Product SKU (2)", "Product Name (2)", "Product Quantity (2)",
+    "Product Unit Price (2)", "Product Discount (2)", "Product HSN Code (2)",
+    "Product Tax % (2)", "Product SKU (3)", "Product Name (3)",
+    "Product Quantity (3)", "Product Unit Price (3)", "Product Discount (3)",
+    "Product HSN Code (3)", "Product Tax % (3)", "Product SKU (4)",
+    "Product Name (4)", "Product Quantity (4)", "Product Unit Price (4)",
+    "Product Discount (4)", "Product HSN Code (4)", "Product Tax % (4)",
+    "Product SKU (5)", "Product Name (5)", "Product Quantity (5)",
+    "Product Unit Price (5)", "Product Discount (5)", "Product HSN Code (5)",
+    "Product Tax % (5)", "Product SKU (6)", "Product Name (6)",
+    "Product Quantity (6)", "Product Unit Price (6)", "Product Discount (6)",
+    "Product HSN Code (6)", "Product Tax % (6)", "Product SKU (7)",
+    "Product Name (7)", "Product Quantity (7)", "Product Unit Price (7)",
+    "Product Discount (7)", "Product HSN Code (7)", "Product Tax % (7)",
+    "Product SKU (8)", "Product Name (8)", "Product Quantity (8)",
+    "Product Unit Price (8)", "Product Discount (8)", "Product HSN Code (8)",
+    "Product Tax % (8)", "Product SKU (9)", "Product Name (9)",
+    "Product Quantity (9)", "Product Unit Price (9)", "Product Discount (9)",
+    "Product HSN Code (9)", "Product Tax % (9)", "Product SKU (10)",
+    "Product Name (10)", "Product Quantity (10)", "Product Unit Price (10)",
+    "Product Discount (10)", "Product HSN Code (10)", "Product Tax % (10)",
+    "Courier Name", "Courier Assigned Date", "AWB", "Zone", "Shipment Status",
+    "Picked Date", "Shipped Date", "EDD", "Delivered Date",
+    "RTO Delivered Date", "Weight Slab",
+    "Total Freight Charges (inclusive of COD)", "Invoice ID", "Charged Weight",
+    "Remittance ID", "Remitted Date", "Pickup Warehouse Nickname",
+    "Contact Person Name", "Contact Number", "Email Address",
+    "Complete address", "Landmark", "Pincode", "City", "State", "Country",
+    "Is Primary (Yes/No)", "Is RTO warehouse same (Yes/No)",
+    "RTO Warehouse Nickname", "RTO Warehouse Contact Person Name",
+    "RTO Warehouse Contact Number", "RTO Warehouse Email Address",
+    "RTO Warehouse Complete address", "RTO Warehouse Landmark",
+    "RTO Warehouse Pincode", "RTO Warehouse City", "RTO Warehouse State",
+    "RTO Warehouse Country",
 ]
 
 # Nimbus shipment_status -> Shiprocket Status.
@@ -129,6 +187,10 @@ NA_COLUMNS = {
 
 MAX_PRODUCTS = 10
 
+# Excel stores dates as "days since 1899-12-30"; 20000..80000 covers 1954..2119.
+EXCEL_EPOCH = datetime(1899, 12, 30)
+EXCEL_SERIAL_RE = re.compile(r"^([2-7]\d{4})(\.\d+)?$")
+
 
 # --------------------------------------------------------------------------- #
 # Small helpers
@@ -138,6 +200,9 @@ def nimbus_date(value: str, with_time: bool = True) -> str:
     value = (value or "").strip()
     if not value:
         return ""
+    if EXCEL_SERIAL_RE.match(value):  # .xlsx stores dates as day counts
+        dt = EXCEL_EPOCH + timedelta(days=float(value))
+        return dt.strftime("%Y-%m-%d %H:%M:%S" if with_time else "%Y-%m-%d")
     for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S",
                 "%Y-%m-%d %H:%M:%S", "%d/%m/%y"):
         try:
@@ -334,9 +399,130 @@ def read_csv(path: str) -> tuple[list[str], list[dict]]:
         return list(reader.fieldnames or []), list(reader)
 
 
+_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+
+
+def _xlsx_number(text: str) -> str:
+    """Render a numeric cell the way the CSV export would (no float noise,
+    no scientific notation, integers without '.0')."""
+    try:
+        f = float(text)
+    except ValueError:
+        return text
+    if f.is_integer():
+        return f"{f:.0f}"
+    return repr(f)
+
+
+def _fix_mojibake(text: str) -> str:
+    """Excel sometimes opens a UTF-8 CSV as Windows-1252, turning '™' into
+    'â„¢' and Hindi into 'à¤šà¤‚...'.  Undo that when the round-trip works."""
+    if not text or not any(ch in text for ch in "Ã¢à"):
+        return text
+    try:
+        return text.encode("cp1252").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+
+
+def _col_index(ref: str) -> int:
+    """'A1' -> 0, 'DF2' -> 109."""
+    n = 0
+    for ch in ref:
+        if ch.isalpha():
+            n = n * 26 + (ord(ch.upper()) - 64)
+        else:
+            break
+    return n - 1
+
+
+def read_xlsx(path: str) -> tuple[list[str], list[dict]]:
+    """Read the first worksheet of an .xlsx into (header, rows-of-strings)
+    using only the standard library, so no openpyxl/pandas is required."""
+    with zipfile.ZipFile(path) as z:
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in z.namelist():
+            for _, el in ET.iterparse(z.open("xl/sharedStrings.xml")):
+                if el.tag == f"{_NS}si":
+                    shared.append("".join(t.text or "" for t in el.iter(f"{_NS}t")))
+                    el.clear()
+
+        # First sheet listed in workbook.xml, resolved through the rels file.
+        wb = ET.fromstring(z.read("xl/workbook.xml"))
+        first = wb.find(f"{_NS}sheets/{_NS}sheet")
+        rid = first.get(f"{_REL_NS}id") if first is not None else None
+        target = "worksheets/sheet1.xml"
+        if rid:
+            rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+            for rel in rels:
+                if rel.get("Id") == rid:
+                    target = rel.get("Target").lstrip("/")
+                    if target.startswith("xl/"):
+                        target = target[3:]
+        sheet_path = f"xl/{target}"
+
+        header: list[str] = []
+        rows: list[dict] = []
+        for _, el in ET.iterparse(z.open(sheet_path)):
+            if el.tag != f"{_NS}row":
+                continue
+            cells: dict[int, str] = {}
+            for c in el.findall(f"{_NS}c"):
+                idx = _col_index(c.get("r", ""))
+                ctype = c.get("t", "n")
+                v = c.find(f"{_NS}v")
+                if ctype == "s":
+                    val = _fix_mojibake(shared[int(v.text)]) if v is not None else ""
+                elif ctype == "inlineStr":
+                    val = _fix_mojibake("".join(t.text or "" for t in c.iter(f"{_NS}t")))
+                elif ctype == "b":
+                    val = "Yes" if (v is not None and v.text == "1") else "No"
+                elif ctype in ("str", "e"):
+                    val = v.text or "" if v is not None else ""
+                else:
+                    val = _xlsx_number(v.text or "") if v is not None else ""
+                cells[idx] = (val or "").strip()
+            el.clear()
+            if not cells:
+                continue
+            width = max(cells) + 1
+            values = [cells.get(i, "") for i in range(width)]
+            if not header:
+                header = values
+                continue
+            values = values[:len(header)] + [""] * (len(header) - len(values))
+            rows.append(dict(zip(header, values)))
+        return header, rows
+
+
+def read_table(path: str) -> tuple[list[str], list[dict]]:
+    """Read a .csv or .xlsx report into (header, rows-of-strings)."""
+    if path.lower().endswith((".xlsx", ".xlsm")):
+        return read_xlsx(path)
+    return read_csv(path)
+
+
+def repair_nimbus_header(header: list[str], rows: list[dict]) -> tuple[list[str], list[dict]]:
+    """If the file has Nimbus' column count but some header cells were edited
+    (e.g. a stray 'x' typed into a header in Excel), restore the standard
+    names by position so the data underneath is not lost."""
+    if len(header) != len(NIMBUS_COLUMNS):
+        return header, rows
+    known = set(NIMBUS_COLUMNS)
+    fixes = {h: c for h, c in zip(header, NIMBUS_COLUMNS) if h != c and h not in known}
+    if not fixes:
+        return header, rows
+    for bad, good in fixes.items():
+        print(f"warning: header {bad!r} is not a Nimbus column; treating it as {good!r}")
+    new_header = [fixes.get(h, h) for h in header]
+    return new_header, [{fixes.get(k, k): v for k, v in r.items()} for r in rows]
+
+
 def convert_nimbus_file(path: str) -> tuple[list[dict], int]:
     """Returns (shiprocket-style rows, number of Nimbus orders converted)."""
-    header, rows = read_csv(path)
+    header, rows = read_table(path)
+    header, rows = repair_nimbus_header(header, rows)
     if "Order ID" not in header or "Shipment Status" not in header:
         sys.exit(f"error: {path} does not look like a Nimbus Post order report "
                  f"(missing 'Order ID' / 'Shipment Status' columns)")
@@ -370,9 +556,9 @@ def main(argv: list[str] | None = None) -> int:
         description="Convert a Nimbus Post order report to Shiprocket's report "
                     "layout and append it below an existing Shiprocket report.")
     ap.add_argument("--nimbus", "-n", required=True,
-                    help="Nimbus Post order_b2c_report CSV")
+                    help="Nimbus Post order_b2c_report (.csv or .xlsx)")
     ap.add_argument("--shiprocket", "-s",
-                    help="Shiprocket report CSV to append below (optional; "
+                    help="Shiprocket report (.csv or .xlsx) to append below (optional; "
                          "omit to only convert the Nimbus file)")
     ap.add_argument("--output", "-o",
                     help="Output CSV path (default: <shiprocket>_combined.csv, or "
@@ -399,7 +585,7 @@ def main(argv: list[str] | None = None) -> int:
     ship_rows: list[dict] = []
     columns = SHIPROCKET_COLUMNS
     if args.shiprocket:
-        ship_header, ship_rows = read_csv(args.shiprocket)
+        ship_header, ship_rows = read_table(args.shiprocket)
         if "Order ID" not in ship_header or "AWB Code" not in ship_header:
             sys.exit(f"error: {args.shiprocket} does not look like a Shiprocket report")
         # Follow the real file's column order if Shiprocket ever changes it.

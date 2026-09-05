@@ -4,6 +4,7 @@ Turns a Nimbus Post `order_b2c_report_*.csv` into the exact column layout of a
 Shiprocket `secure_*_reports_*.csv`, and appends the converted rows **below** the
 Shiprocket data so both carriers live in one file.
 
+Both inputs can be `.csv` or `.xlsx` (the formats the two dashboards download as).
 Pure Python 3 (standard library only). Nothing to install.
 
 ## Quick start
@@ -53,11 +54,16 @@ risk scores, UTR, etc.) are left blank.
 
 ## Things to know
 
+* **Prefer the `.xlsx` Nimbus download.** Excel keeps AWB numbers intact in
+  `.xlsx`; in a `.csv` that has been opened and re-saved by Excel they come out
+  as `3.72126E+11` and cannot be recovered. The converter reads `.xlsx` directly
+  (dates stored as Excel serial numbers are handled).
+* **Edited header cells** are tolerated: if the file has Nimbus' 145 columns but a
+  header was typed over (e.g. `x` instead of `Channel Name`), the standard name
+  is restored by position and a warning is printed.
+* **Mojibake from Excel** (`â„¢` for `™`, garbled Hindi names) is repaired
+  automatically when the text round-trips cleanly.
 * **Trailing blank rows** in Nimbus exports are skipped automatically.
-* **AWB numbers in scientific notation** (`3.72126E+11`): if the Nimbus file was
-  opened and re-saved in Excel before running the converter, Excel has already
-  destroyed those AWB values and they cannot be recovered. Run the converter on
-  the CSV exactly as downloaded from Nimbus to keep full AWBs.
 * **Discount Value** carries the order-level *Total Discount* from Nimbus,
   repeated on every product line of that order.
 * The converter validates that each input really is a Nimbus / Shiprocket report
