@@ -185,7 +185,11 @@ NA_COLUMNS = {
     "Lost Date", "Latest OFD Date",
 }
 
+# Nimbus exports carry a variable number of product column groups (9, 10, 15,
+# 16 have all been seen).  The real count is read off the header per file;
+# this is only the fallback for a header we cannot read it from.
 MAX_PRODUCTS = 10
+PRODUCT_INDEX_RE = re.compile(r"^Product (?:SKU|Name) \((\d+)\)\*?$")
 
 # Excel stores dates as "days since 1899-12-30"; 20000..80000 covers 1954..2119.
 EXCEL_EPOCH = datetime(1899, 12, 30)
@@ -253,18 +257,30 @@ def master_courier(courier_name: str) -> str:
     return courier_name.split()[0]
 
 
-def product_col(row: dict, base: str, idx: int) -> str:
+def product_col(row: dict, base, idx: int) -> str:
     """Nimbus product column names carry a '*' on the required first-product
-    columns, e.g. 'Product Name (1)*'.  Look up both spellings."""
-    for name in (f"{base} ({idx})", f"{base} ({idx})*"):
-        if name in row:
-            return (row[name] or "").strip()
+    columns, e.g. 'Product Name (1)*'.  Look up both spellings.  'base' may be
+    a tuple when exports disagree on the name, e.g. 'Product Discount (1)' vs
+    'Unit Product Discount (1)'."""
+    bases = (base,) if isinstance(base, str) else base
+    for b in bases:
+        for name in (f"{b} ({idx})", f"{b} ({idx})*"):
+            if name in row:
+                return (row[name] or "").strip()
     return ""
+
+
+def max_product_index(row: dict) -> int:
+    """Highest product group number this export actually has columns for."""
+    indexes = [int(m.group(1))
+               for m in (PRODUCT_INDEX_RE.match(k) for k in row)
+               if m]
+    return max(indexes) if indexes else MAX_PRODUCTS
 
 
 def nimbus_products(row: dict) -> list[dict]:
     products = []
-    for i in range(1, MAX_PRODUCTS + 1):
+    for i in range(1, max_product_index(row) + 1):
         sku = product_col(row, "Product SKU", i)
         name = product_col(row, "Product Name", i)
         if not sku and not name:
@@ -274,7 +290,8 @@ def nimbus_products(row: dict) -> list[dict]:
             "name": name,
             "qty": product_col(row, "Product Quantity", i),
             "price": product_col(row, "Product Unit Price", i),
-            "discount": product_col(row, "Product Discount", i),
+            "discount": product_col(
+                row, ("Product Discount", "Unit Product Discount"), i),
             "hsn": product_col(row, "Product HSN Code", i),
             "tax_pct": product_col(row, "Product Tax %", i),
         })
@@ -535,9 +552,21 @@ def convert_nimbus_file(path: str) -> tuple[list[dict], int]:
     return out, orders
 
 
+CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def strip_control_chars(value):
+    """Some Nimbus address fields carry NUL and other control bytes.  They are
+    illegal in XML and confuse spreadsheet importers, so drop them."""
+    if isinstance(value, str):
+        return CONTROL_CHARS_RE.sub("", value)
+    return value
+
+
 def write_csv(path: str, columns: list[str], rows: list[dict],
               source_column: bool = False) -> None:
     cols = columns + (["Source"] if source_column else [])
+    rows = [{k: strip_control_chars(v) for k, v in row.items()} for row in rows]
     tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)) or ".",
                                         suffix=".csv.tmp")
     with os.fdopen(tmp_fd, "w", newline="", encoding="utf-8") as fh:
