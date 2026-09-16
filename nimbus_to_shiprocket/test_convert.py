@@ -215,6 +215,34 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual([r["Order ID"] for r in rows], ["ABBC-1", "BC-1", "BC-1"])
             self.assertEqual(rows[0]["Product Name"], "Existing")  # untouched
 
+    def test_shiprocket_file_with_extra_trailing_columns(self):
+        """Shiprocket has since grown 'OTP Verified Delivery', 'UDF 1'..'UDF 4'
+        and friends past the original 118.  Follow the real file's layout and
+        leave the new columns blank on converted rows."""
+        extra = ["OTP Verified Delivery", "UDF 1", "UDF 2"]
+        columns = convert.SHIPROCKET_COLUMNS + extra
+        with tempfile.TemporaryDirectory() as d:
+            nimbus = os.path.join(d, "nimbus.csv")
+            ship = os.path.join(d, "ship.csv")
+            out = os.path.join(d, "out.csv")
+            n1 = nimbus_row()
+            self._write(nimbus, list(n1), [n1])
+            s1 = {c: "" for c in columns}
+            s1.update({"Order ID": "ABBC-1", "AWB Code": "123",
+                       "OTP Verified Delivery": "Yes", "UDF 1": "keep me"})
+            self._write(ship, columns, [s1])
+
+            convert.main(["--nimbus", nimbus, "--shiprocket", ship, "-o", out])
+
+            with open(out, newline="", encoding="utf-8") as fh:
+                reader = csv.DictReader(fh)
+                self.assertEqual(reader.fieldnames, columns)
+                rows = list(reader)
+            self.assertEqual(rows[0]["OTP Verified Delivery"], "Yes")
+            self.assertEqual(rows[0]["UDF 1"], "keep me")
+            for r in rows[1:]:
+                self.assertEqual([r[c] for c in extra], ["", "", ""])
+
     def test_skip_existing_and_source_column(self):
         with tempfile.TemporaryDirectory() as d:
             nimbus = os.path.join(d, "nimbus.csv")
