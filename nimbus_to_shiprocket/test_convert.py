@@ -97,6 +97,33 @@ class ConvertRowTests(unittest.TestCase):
         self.assertEqual(r["Remitted Amount"], "2798.20")
         self.assertEqual(r["CRF ID"], "R1")
 
+    def test_product_groups_beyond_the_tenth(self):
+        """Wider Nimbus exports carry 15 or 16 product groups, not 10."""
+        extra = {}
+        for i in range(3, 17):
+            extra[f"Product SKU ({i})"] = f"sku-{i}"
+            extra[f"Product Name ({i})"] = f"Item {i}"
+            extra[f"Product Quantity ({i})"] = "1"
+            extra[f"Product Unit Price ({i})"] = "10"
+        rows = convert.convert_nimbus_row(nimbus_row(**extra))
+        self.assertEqual(len(rows), 16)
+        self.assertEqual(rows[-1]["Channel SKU"], "sku-16")
+
+    def test_unit_product_discount_alias(self):
+        """Some exports name the column 'Unit Product Discount (n)'."""
+        row = nimbus_row(**{"Unit Product Discount (1)": "25"})
+        self.assertEqual(convert.nimbus_products(row)[0]["discount"], "25")
+
+    def test_control_bytes_are_stripped_on_write(self):
+        rows = convert.convert_nimbus_row(
+            nimbus_row(**{"Shipping Complete Address": "House 1\x00\x00"}))
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "out.csv")
+            convert.write_csv(out, convert.SHIPROCKET_COLUMNS, rows)
+            text = open(out, encoding="utf-8").read()
+        self.assertNotIn("\x00", text)
+        self.assertIn("House 1", text)
+
 
 class XlsxTests(unittest.TestCase):
     def _write_xlsx(self, path, header, rows):
