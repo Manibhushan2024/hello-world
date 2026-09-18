@@ -6,7 +6,7 @@ Build the marketplace sales report workbook from an EasyEcom-style combined expo
 Produces an Excel workbook whose every figure is driven by live formulas off the
 'Raw Data' sheet, so pasting a fresh export refreshes the whole report.
 """
-import csv, os, sys
+import csv, os, re, sys
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter as CL
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -47,6 +47,14 @@ def title_row(ws, text, width):
     c = ws.cell(row=1, column=1, value=text); c.font = F_TITLE; c.fill = FILL_T
     c.alignment = Alignment(horizontal="left", vertical="center")
     ws.row_dimensions[1].height = 24
+
+def assert_name_safe(nm):
+    """Excel silently reads a defined name that looks like a cell reference AS that
+    reference, which turns every formula using it into #VALUE!. 'SKU1' and 'QTY1'
+    are real cells (columns 13151 and 12037), so such names must never be used."""
+    if re.fullmatch(r"[A-Za-z]{1,3}\d{1,7}", nm) or re.fullmatch(r"[Rr]\d+[Cc]\d+", nm):
+        raise SystemExit("defined name %r looks like a cell reference - Excel will "
+                         "misread it and every formula using it returns #VALUE!" % nm)
 
 wb = Workbook()
 
@@ -489,6 +497,7 @@ for nm, ref in [
     ("DSTART", "Settings!$B$15"),
     ("SKULIST", "'SKU Master'!$A$4:$A$%d" % (3 + NS)),
 ]:
+    assert_name_safe(nm)
     wb.defined_names.add(DefinedName(nm, attr_text=ref))
 
 wb.calculation.fullCalcOnLoad = True

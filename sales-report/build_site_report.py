@@ -8,7 +8,7 @@ The site export is one row per ORDER with up to 16 product blocks side by side
 blocks rather than down a single column. Every figure is a live formula reading
 the 'Raw Data' sheet, so pasting a fresh export refreshes the whole report.
 """
-import csv, json, os, sys
+import csv, json, os, re, sys
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter as CL
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -60,13 +60,21 @@ def band(ws,row,text,width):
 
 # sum of one SUMIFS per product block, for each SKU code folded into this row
 def blocks(crit, tail):
-    return "+".join("SUMIFS(QTY%d,SKU%d,%s%s)" % (n, n, c, tail)
+    return "+".join("SUMIFS(QTY_%d,SKU_%d,%s%s)" % (n, n, c, tail)
                     for c in ([crit] if isinstance(crit, str) else crit)
                     for n in range(1, NBLOCK + 1))
 
 def codes_for(row_ref, sku_name):
     """Criteria for a sales row: its own cell, plus any alias codes as literals."""
     return [row_ref] + ['"%s"' % a for a in ALIAS.get(sku_name, [])]
+
+def assert_name_safe(nm):
+    """Excel silently reads a defined name that looks like a cell reference AS that
+    reference, which turns every formula using it into #VALUE!. 'SKU1' and 'QTY1'
+    are real cells (columns 13151 and 12037), so such names must never be used."""
+    if re.fullmatch(r"[A-Za-z]{1,3}\d{1,7}", nm) or re.fullmatch(r"[Rr]\d+[Cc]\d+", nm):
+        raise SystemExit("defined name %r looks like a cell reference - Excel will "
+                         "misread it and every formula using it returns #VALUE!" % nm)
 
 wb = Workbook()
 
@@ -490,9 +498,11 @@ names=[("WDATE","Work!$A$2:$A$%d"%(RAWCAP+1)),
        ("DEND","Settings!$B$15"),("DSTART","Settings!$B$16"),
        ("SKULIST","'SKU Master'!$A$4:$A$%d"%(3+NS))]
 for nn in range(1,NBLOCK+1):
-    names.append(("SKU%d"%nn,"'Raw Data'!$%s$2:$%s$%d"%(CL(SKU_COL(nn)),CL(SKU_COL(nn)),RAWCAP+1)))
-    names.append(("QTY%d"%nn,"'Raw Data'!$%s$2:$%s$%d"%(CL(QTY_COL(nn)),CL(QTY_COL(nn)),RAWCAP+1)))
-for nm,ref in names: wb.defined_names.add(DefinedName(nm,attr_text=ref))
+    names.append(("SKU_%d"%nn,"'Raw Data'!$%s$2:$%s$%d"%(CL(SKU_COL(nn)),CL(SKU_COL(nn)),RAWCAP+1)))
+    names.append(("QTY_%d"%nn,"'Raw Data'!$%s$2:$%s$%d"%(CL(QTY_COL(nn)),CL(QTY_COL(nn)),RAWCAP+1)))
+for nm,ref in names:
+    assert_name_safe(nm)
+    wb.defined_names.add(DefinedName(nm,attr_text=ref))
 
 wb.calculation.fullCalcOnLoad=True
 wb.save(OUT)
