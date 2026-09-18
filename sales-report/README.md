@@ -1,4 +1,11 @@
-# Marketplace Sales Report
+# Sales Reports
+
+Two Excel report generators over the same 182-SKU master list:
+
+- **`build_report.py`** — marketplace (Amazon + Flipkart + Myntra), from the combined EasyEcom export.
+- **`build_site_report.py`** — website (Shopify / OMS), from the site orders export.
+
+## Marketplace report
 
 Builds an Excel workbook that turns the combined EasyEcom marketplace export
 (Amazon + Flipkart + Myntra) into a date-wise / SKU-wise sales report.
@@ -66,3 +73,75 @@ inserting or deleting rows in `Raw Data` cannot break it.
 `Work` covers 30,000 export rows (~55 days at current volumes). To go beyond that,
 copy the last `Work` row further down and extend the `WDATE` / `WPLAT` / `WSKU` /
 `WQTY` named ranges.
+
+
+---
+
+# Website report (`build_site_report.py`)
+
+```bash
+python3 build_site_report.py <site_orders.csv> [output.xlsx]
+python3 build_site_report.py "" blank.xlsx      # empty template
+```
+
+Same 15-day window logic and the same 182-SKU master as the marketplace report.
+
+## Reading the site export
+
+The site export is **one row per order** with up to 16 product blocks laid out
+across the row, so quantities are read sideways rather than down a column:
+
+| Block | SKU column | Quantity column |
+|---|---|---|
+| 1 | `AL` (38) | `AN` (40) |
+| n | `38 + 7(n-1)` | `40 + 7(n-1)` |
+| 16 | `EM` (143) | `EO` (145) |
+
+`Order Date` is column `A`, `Order ID` is `B`, `Shipment Status` is `EY` (155).
+All 16 blocks are summed, so multi-item orders count in full.
+
+### Dates
+
+The site export writes `Order Date` as `dd/mm/yyyy` **text**. The workbook reads
+both that text and real Excel dates. On a US (`mm/dd/yyyy`) locale Excel converts
+ambiguous values wrongly on paste, so `Settings` surfaces the earliest and latest
+dates read plus an "orders whose date could not be read" counter as a tripwire.
+
+## Pending orders
+
+An order is pending when `Shipment Status` is `created` or `draft`. The report
+gives the pending order count, the SKU-wise quantity behind it, and an
+order-by-order list. Pending figures cover **every** pending order in the pasted
+data, not just the 15-day window — an older unshipped order still needs picking.
+
+## SKUs outside the master list
+
+Site rows sometimes carry SKUs absent from the 182-SKU master (typos, retired
+codes, a `'-` placeholder). They are **never folded into the 182 rows**. Instead
+they get their own block below the TOTAL row on `Website Sales`, and
+`Daily Orders` carries a per-day "not in SKU list" units column so nothing is
+lost silently. The block is seeded from `site_unlisted_skus.json`; a new bad code
+will not get its own row but will still show in that column.
+
+## Sheets
+
+| Sheet | Contents |
+|---|---|
+| `Settings` | Window controls, live totals, date-read tripwire |
+| `Daily Orders` | Orders and units per day, averages, pending count, unlisted check |
+| `Website Sales` | Date-wise × SKU-wise units, 15-day total, average per day, unlisted block |
+| `Best Sellers` | All 182 SKUs ranked for the window |
+| `Pending Orders` | Pending count and SKU-wise quantity |
+| `Pending Order List` | One row per pending order with its SKUs and quantities |
+| `SKU Master`, `Raw Data`, `Work` | SKU list, paste area, hidden helper |
+
+## Capacity
+
+`Raw Data` / `Work` cover 25,000 orders (~23 days at current volume) and the
+pending list holds 3,000 orders. Extend by widening the named ranges.
+
+## Files
+
+- `build_site_report.py` — website workbook generator
+- `site_raw_header.txt` — site export header row, for building an empty template
+- `site_unlisted_skus.json` — SKUs seen in the export that are not in `skus.txt`
