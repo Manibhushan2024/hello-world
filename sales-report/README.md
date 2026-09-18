@@ -117,11 +117,25 @@ data, not just the 15-day window — an older unshipped order still needs pickin
 ## SKUs outside the master list
 
 Site rows sometimes carry SKUs absent from the 182-SKU master (typos, retired
-codes, a `'-` placeholder). They are **never folded into the 182 rows**. Instead
-they get their own block below the TOTAL row on `Website Sales`, and
-`Daily Orders` carries a per-day "not in SKU list" units column so nothing is
-lost silently. The block is seeded from `site_unlisted_skus.json`; a new bad code
-will not get its own row but will still show in that column.
+codes, a `'-` placeholder). Two mechanisms handle them.
+
+**Merged duplicate listings.** `site_sku_aliases.json` maps a master SKU to the
+alternate codes counted into it:
+
+```json
+{"jellybra-q1-cleoblue-ss": ["jellybra-q1-cleoblue-s"]}
+```
+
+The site carries both codes for the same size, so they are summed into the one
+master row. Merged rows are highlighted on `SKU Master` with an "Also counts"
+column, and the alternate code is dropped from the unlisted block so nothing is
+counted twice.
+
+**Everything else** is *never* folded into the 182 rows. It gets its own block
+below the TOTAL row on `Website Sales`, and `Daily Orders` carries a per-day
+"not in SKU list" units column so nothing is lost silently. The block is seeded
+from `site_unlisted_skus.json`; a new bad code will not get its own row but will
+still show in that column.
 
 ## Sheets
 
@@ -145,3 +159,4 @@ pending list holds 3,000 orders. Extend by widening the named ranges.
 - `build_site_report.py` — website workbook generator
 - `site_raw_header.txt` — site export header row, for building an empty template
 - `site_unlisted_skus.json` — SKUs seen in the export that are not in `skus.txt`
+- `site_sku_aliases.json` — alternate site codes folded into a master SKU

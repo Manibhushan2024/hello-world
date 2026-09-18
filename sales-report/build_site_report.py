@@ -20,6 +20,7 @@ CSVF = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else None
 OUT  = sys.argv[2] if len(sys.argv) > 2 else os.path.join(HERE, "Website_Sales_Report.xlsx")
 SKUF = os.path.join(HERE, "skus.txt")
 UNLF = os.path.join(HERE, "site_unlisted_skus.json")
+ALIF = os.path.join(HERE, "site_sku_aliases.json")
 
 RAWCAP  = 25000            # Raw Data / Work rows 2..RAWCAP+1
 NDAYS   = 15
@@ -32,7 +33,10 @@ PENDING = ("created", "draft")
 
 skus = [l.strip() for l in open(SKUF) if l.strip()]
 NS = len(skus)
-unlisted = json.load(open(UNLF)) if os.path.exists(UNLF) else []
+# {master_sku: [alternate codes counted into it]} - folds duplicate listings into one row
+ALIAS = json.load(open(ALIF)) if os.path.exists(ALIF) else {}
+_aliased = {a for v in ALIAS.values() for a in v}
+unlisted = [u for u in (json.load(open(UNLF)) if os.path.exists(UNLF) else []) if u not in _aliased]
 NU = len(unlisted)
 
 NAVY="1F3864"; BLUE="2E5C8A"; LIGHT="DCE6F1"; ACCENT="FFF2CC"; GREEN="E2EFDA"; RUST="C55A11"
@@ -54,9 +58,15 @@ def band(ws,row,text,width):
     c=ws.cell(row=row,column=1,value=text); c.font=F_HEAD; c.fill=FILL_H
     ws.merge_cells(start_row=row,start_column=1,end_row=row,end_column=width)
 
-# sum of one SUMIFS per product block
-def blocks(extra):
-    return "+".join("SUMIFS(QTY%d,SKU%d,%s)" % (n, n, extra) for n in range(1, NBLOCK + 1))
+# sum of one SUMIFS per product block, for each SKU code folded into this row
+def blocks(crit, tail):
+    return "+".join("SUMIFS(QTY%d,SKU%d,%s%s)" % (n, n, c, tail)
+                    for c in ([crit] if isinstance(crit, str) else crit)
+                    for n in range(1, NBLOCK + 1))
+
+def codes_for(row_ref, sku_name):
+    """Criteria for a sales row: its own cell, plus any alias codes as literals."""
+    return [row_ref] + ['"%s"' % a for a in ALIAS.get(sku_name, [])]
 
 wb = Workbook()
 
@@ -180,8 +190,7 @@ st.column_dimensions["C"].width=58; st.sheet_view.showGridLines=False
 # ---------------------------------------------------------------- SKU Master
 sm=wb.create_sheet("SKU Master")
 title_row(sm,"SKU MASTER  —  the list every sheet is built from",4)
-sm.cell(row=2,column=1,value="Same 182 SKUs as the marketplace report.").font=NOTE
-for i,h in enumerate(["SKU","Product","Colour","Size"],start=1):
+for i,h in enumerate(["SKU","Product","Colour","Size","Also counts (merged duplicate listings)"],start=1):
     c=sm.cell(row=3,column=i,value=h); c.font=F_HEAD; c.fill=FILL_H; c.border=BORDER; c.alignment=CTR
 SIZEMAP={"ss":"S","sm":"M","sl":"L","sxl":"XL","sxxl":"XXL","sxxxl":"3XL","s4xl":"4XL"}
 PRODMAP={"jellybra":"JellyLift Bra","stayputstrapless":"StayPut Strapless","instatuck":"InstaTuck","widestr":"Wide Strap Bra"}
@@ -191,8 +200,14 @@ for i,s in enumerate(skus):
     sm.cell(row=4+i,column=2,value=PRODMAP.get(p[0],p[0])).border=BORDER
     sm.cell(row=4+i,column=3,value=p[2][1:] if len(p)>2 else "").border=BORDER
     c=sm.cell(row=4+i,column=4,value=SIZEMAP.get(p[3],p[3]) if len(p)>3 else ""); c.border=BORDER; c.alignment=CTR
-for cc,w in (("A",34),("B",20),("C",18),("D",8)): sm.column_dimensions[cc].width=w
-sm.freeze_panes="A4"; sm.auto_filter.ref="A3:D%d"%(3+NS); sm.sheet_view.showGridLines=False
+    if s in ALIAS:
+        c=sm.cell(row=4+i,column=5,value=", ".join(ALIAS[s])); c.border=BORDER
+        c.font=Font(size=9); c.fill=PatternFill("solid",fgColor="E2EFDA")
+        sm.cell(row=4+i,column=1).fill=PatternFill("solid",fgColor="E2EFDA")
+sm.cell(row=2,column=1,value="Same 182 SKUs as the marketplace report. Green rows fold a duplicate site listing into the master SKU "
+        "(edit site_sku_aliases.json to change).").font=NOTE
+for cc,w in (("A",34),("B",20),("C",18),("D",8),("E",42)): sm.column_dimensions[cc].width=w
+sm.freeze_panes="A4"; sm.auto_filter.ref="A3:E%d"%(3+NS); sm.sheet_view.showGridLines=False
 
 # ---------------------------------------------------------------- Website Sales
 sales=wb.create_sheet("Website Sales")
@@ -220,11 +235,12 @@ for col,lbl in ((QCOL,"Total (window)"),(RCOL,"Avg / Day")):
     c.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
 sales.row_dimensions[4].height=62
 
-def sku_row(r, name_formula, tie_row):
+def sku_row(r, name_formula, tie_row, sku_name=None):
     c=sales.cell(row=r,column=1,value=name_formula); c.border=BORDER; c.font=Font(size=9)
+    crit=codes_for("$A%d"%r, sku_name)
     for d in range(NDAYS):
         col=CL(DCOL0+d)
-        c=sales.cell(row=r,column=DCOL0+d,value="="+blocks("$A%d,WDATE,%s$4"%(r,col)))
+        c=sales.cell(row=r,column=DCOL0+d,value="="+blocks(crit,",WDATE,%s$4"%col))
         c.border=BORDER; c.number_format='0;;"0"'; c.font=Font(size=9); c.alignment=CTR
     c=sales.cell(row=r,column=QCOL,value="=SUM(%s%d:%s%d)"%(CL(DCOL0),r,CL(DCOL0+NDAYS-1),r))
     c.border=BORDER; c.font=F_B; c.fill=FILL_L; c.number_format="#,##0"; c.alignment=CTR
@@ -234,11 +250,15 @@ def sku_row(r, name_formula, tie_row):
         sales.cell(row=r,column=SCOL,value="=%s%d+(1000-ROW())/1000000"%(CL(QCOL),r))
 
 for i in range(NS):
-    sku_row(FIRST+i,"='SKU Master'!$A$%d"%(4+i),True)
+    r=FIRST+i
+    sku_row(r,"='SKU Master'!$A$%d"%(4+i),True,skus[i])
+    if skus[i] in ALIAS:
+        sales.cell(row=r,column=1).fill=PatternFill("solid",fgColor="E2EFDA")
+        sales.cell(row=r,column=1).comment=None
 band(sales,LAST+1,"SKUs FOUND IN THE EXPORT THAT ARE NOT IN YOUR 182-SKU LIST  —  reported separately, never folded in above",RCOL)
 for i,u in enumerate(unlisted):
     r=UFIRST+i
-    sku_row(r,u,None)
+    sku_row(r,u,None,None)
     sales.cell(row=r,column=1).fill=PatternFill("solid",fgColor="FCE4D6")
 c=sales.cell(row=TOTR,column=1,value="TOTAL — tracked + unlisted"); c.font=F_HEAD; c.fill=FILL_T; c.border=BORDER
 for col in list(range(DCOL0,DCOL0+NDAYS))+[QCOL,RCOL]:
@@ -277,7 +297,7 @@ for d in range(NDAYS):
     c=do.cell(row=r,column=2,value="=COUNTIFS(WDATE,$A%d)"%r); c.border=BORDER; c.number_format="#,##0"; c.alignment=CTR
     c=do.cell(row=r,column=3,value="='Website Sales'!%s%d"%(CL(DCOL0+d),SALES_TOTAL_ROW+1))
     c.border=BORDER; c.number_format="#,##0"; c.font=F_B; c.fill=FILL_L; c.alignment=CTR
-    c=do.cell(row=r,column=4,value="="+blocks('"<>",WDATE,$A%d'%r)); c.border=BORDER; c.number_format="#,##0"; c.alignment=CTR
+    c=do.cell(row=r,column=4,value="="+blocks('"<>"',',WDATE,$A%d'%r)); c.border=BORDER; c.number_format="#,##0"; c.alignment=CTR
     c=do.cell(row=r,column=5,value="=D%d-C%d"%(r,r)); c.border=BORDER; c.number_format="#,##0"; c.alignment=CTR; c.font=Font(size=9,color="808080")
     c=do.cell(row=r,column=6,value="=IF(B%d=0,0,D%d/B%d)"%(r,r,r)); c.border=BORDER; c.number_format="#,##0.00"; c.alignment=CTR
     c=do.cell(row=r,column=7,value='=IF(N($A%d)=0,"",TEXT($A%d,"ddd"))'%(r,r)); c.border=BORDER; c.alignment=CTR; c.font=Font(size=9,color="808080")
@@ -356,13 +376,15 @@ for i,h in enumerate(["SKU",'Units\n"created"','Units\n"draft"',"TOTAL\npending 
     c=po.cell(row=PR0-1,column=i,value=h); c.font=F_HEAD; c.fill=FILL_H; c.border=BORDER
     c.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
 po.row_dimensions[PR0-1].height=32
-allsk=[("='SKU Master'!$A$%d"%(4+i),False) for i in range(NS)]+[(u,True) for u in unlisted]
-for i,(nm,isu) in enumerate(allsk):
+allsk=[("='SKU Master'!$A$%d"%(4+i),False,skus[i]) for i in range(NS)]+[(u,True,None) for u in unlisted]
+for i,(nm,isu,sname) in enumerate(allsk):
     r=PR0+i
     c=po.cell(row=r,column=1,value=nm); c.border=BORDER; c.font=Font(size=9)
     if isu: c.fill=PatternFill("solid",fgColor="FCE4D6")
-    c=po.cell(row=r,column=2,value="="+blocks('$A%d,WSTAT,"created"'%r)); c.border=BORDER; c.number_format='0;;"0"'; c.alignment=CTR; c.font=Font(size=9)
-    c=po.cell(row=r,column=3,value="="+blocks('$A%d,WSTAT,"draft"'%r)); c.border=BORDER; c.number_format='0;;"0"'; c.alignment=CTR; c.font=Font(size=9)
+    elif sname in ALIAS: c.fill=PatternFill("solid",fgColor="E2EFDA")
+    crit=codes_for("$A%d"%r, sname)
+    c=po.cell(row=r,column=2,value="="+blocks(crit,',WSTAT,"created"')); c.border=BORDER; c.number_format='0;;"0"'; c.alignment=CTR; c.font=Font(size=9)
+    c=po.cell(row=r,column=3,value="="+blocks(crit,',WSTAT,"draft"')); c.border=BORDER; c.number_format='0;;"0"'; c.alignment=CTR; c.font=Font(size=9)
     c=po.cell(row=r,column=4,value="=B%d+C%d"%(r,r)); c.border=BORDER; c.number_format="#,##0"; c.font=F_B; c.fill=FILL_L; c.alignment=CTR
     c=po.cell(row=r,column=5,value='=IFERROR(INDEX(\'SKU Master\'!$B$4:$B$%d,MATCH($A%d,SKULIST,0)),"not in SKU list")'%(3+NS,r)); c.border=BORDER; c.font=Font(size=9)
     c=po.cell(row=r,column=6,value='=IFERROR(INDEX(\'SKU Master\'!$D$4:$D$%d,MATCH($A%d,SKULIST,0)),"")'%(3+NS,r)); c.border=BORDER; c.font=Font(size=9); c.alignment=CTR
