@@ -114,6 +114,38 @@ class ConvertRowTests(unittest.TestCase):
         row = nimbus_row(**{"Unit Product Discount (1)": "25"})
         self.assertEqual(convert.nimbus_products(row)[0]["discount"], "25")
 
+    def test_shipment_only_export_has_no_product_lines(self):
+        """Some Nimbus exports are shipment-only: 76 columns, no line items."""
+        row = {k: v for k, v in nimbus_row().items()
+               if not k.startswith("Product ")}
+        self.assertFalse(convert.has_product_columns(row))
+        rows = convert.convert_nimbus_row(row)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["Channel SKU"], "")
+        self.assertEqual(rows[0]["Product Name"], "")
+
+    def test_shipment_only_order_total_follows_collectable_amount(self):
+        """Without line items the charges alone would understate the order, so
+        Nimbus' own Collectable Amount stands in on COD orders."""
+        row = {k: v for k, v in nimbus_row().items()
+               if not k.startswith("Product ")}
+        self.assertEqual(convert.convert_nimbus_row(row)[0]["Order Total"],
+                         "2798.20")
+
+    def test_shipment_only_prepaid_order_total_is_blank(self):
+        """A prepaid order in such an export carries no value anywhere, so the
+        column is left blank instead of going negative on the discount."""
+        row = {k: v for k, v in nimbus_row().items()
+               if not k.startswith("Product ")}
+        row.update({"Payment Method (COD/Prepaid)": "Prepaid",
+                    "Collectable Amount": "0.00", "Shipping Charges": "0"})
+        self.assertEqual(convert.convert_nimbus_row(row)[0]["Order Total"], "")
+
+    def test_line_item_exports_still_compute_order_total(self):
+        """The usual export is unaffected: line items plus order-level charges."""
+        self.assertEqual(convert.convert_nimbus_row(nimbus_row())[0]["Order Total"],
+                         "2798.20")
+
     def test_control_bytes_are_stripped_on_write(self):
         rows = convert.convert_nimbus_row(
             nimbus_row(**{"Shipping Complete Address": "House 1\x00\x00"}))

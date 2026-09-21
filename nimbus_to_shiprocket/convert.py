@@ -270,6 +270,11 @@ def product_col(row: dict, base, idx: int) -> str:
     return ""
 
 
+def has_product_columns(row: dict) -> bool:
+    """Some Nimbus exports are shipment-only and carry no line items at all."""
+    return any(PRODUCT_INDEX_RE.match(k) for k in row)
+
+
 def max_product_index(row: dict) -> int:
     """Highest product group number this export actually has columns for."""
     indexes = [int(m.group(1))
@@ -298,7 +303,18 @@ def nimbus_products(row: dict) -> list[dict]:
     return products
 
 
-def order_total(row: dict, products: list[dict]) -> float:
+def order_total(row: dict, products: list[dict]) -> float | None:
+    """Order value, built up from the line items and the order-level charges.
+
+    A shipment-only export has no line items to add up, so the charges alone
+    would understate the order (and can even go negative once the discount is
+    taken off).  There Nimbus' own Collectable Amount is the order value on a
+    COD order; a prepaid order carries no value at all and is left blank
+    rather than filled with a number the export cannot support.
+    """
+    if not has_product_columns(row):
+        collectable = to_float(row.get("Collectable Amount"))
+        return collectable if collectable else None
     subtotal = sum(to_float(p["qty"], 1) * to_float(p["price"]) for p in products)
     return (subtotal
             - to_float(row.get("Total Discount"))
@@ -320,7 +336,8 @@ def convert_nimbus_row(row: dict) -> list[dict]:
         products = [{"sku": "", "name": "", "qty": "", "price": "",
                      "discount": "", "hsn": "", "tax_pct": ""}]
 
-    total = money(order_total(row, products))
+    raw_total = order_total(row, products)
+    total = money(raw_total) if raw_total is not None else ""
     order_date = nimbus_date(g("Order Date"))
     payment = g("Payment Method (COD/Prepaid)").lower()
     is_reverse = "Yes" if payment == "reverse" else "No"
