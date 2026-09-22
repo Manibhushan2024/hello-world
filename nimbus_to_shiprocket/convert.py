@@ -317,10 +317,23 @@ def order_total(row: dict, products: list[dict]) -> float | None:
         return collectable if collectable else None
     subtotal = sum(to_float(p["qty"], 1) * to_float(p["price"]) for p in products)
     return (subtotal
-            - to_float(row.get("Total Discount"))
+            - order_discount(row, products)
             + to_float(row.get("Shipping Charges"))
             + to_float(row.get("COD Charges"))
             + to_float(row.get("Other Charges")))
+
+
+def order_discount(row: dict, products: list[dict]) -> float:
+    """The discount to take off the line items.
+
+    Nimbus reports a discount in either of two places: the order-level "Total
+    Discount", or a per-unit "Unit Product Discount (n)" on each line.  Some
+    exports use only one, some carry the same figure in both -- never two
+    different discounts -- so the larger of the two is the order's discount and
+    adding them would take it off twice.
+    """
+    per_unit = sum(to_float(p["qty"], 1) * to_float(p["discount"]) for p in products)
+    return max(to_float(row.get("Total Discount")), per_unit)
 
 
 # --------------------------------------------------------------------------- #

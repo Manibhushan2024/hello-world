@@ -114,6 +114,39 @@ class ConvertRowTests(unittest.TestCase):
         row = nimbus_row(**{"Unit Product Discount (1)": "25"})
         self.assertEqual(convert.nimbus_products(row)[0]["discount"], "25")
 
+    def test_per_unit_discount_comes_off_the_order_total(self):
+        """Some exports put the discount only on the lines, as a per-unit
+        "Unit Product Discount (n)", and leave Total Discount at 0."""
+        row = nimbus_row(**{"Total Discount": "0",
+                            "Unit Product Discount (1)": "400",
+                            "Unit Product Discount (2)": "400"})
+        # 1499 + 1499 - 400 - 400 + 100 shipping
+        self.assertEqual(convert.convert_nimbus_row(row)[0]["Order Total"],
+                         "2298.00")
+
+    def test_per_unit_discount_scales_with_quantity(self):
+        """It is per unit, not per line, so quantity multiplies it."""
+        row = nimbus_row(**{"Total Discount": "0", "Product Quantity (1)*": "3",
+                            "Unit Product Discount (1)": "100",
+                            "Product SKU (2)": "", "Product Name (2)": ""})
+        # 3 x 1499 - 3 x 100 + 100 shipping
+        self.assertEqual(convert.convert_nimbus_row(row)[0]["Order Total"],
+                         "4297.00")
+
+    def test_discount_in_both_places_is_only_taken_off_once(self):
+        """An export may carry the same discount order-level and per-unit;
+        summing them would take it off twice."""
+        row = nimbus_row(**{"Total Discount": "299.8",
+                            "Unit Product Discount (1)": "149.9",
+                            "Unit Product Discount (2)": "149.9"})
+        self.assertEqual(convert.convert_nimbus_row(row)[0]["Order Total"],
+                         "2798.20")
+
+    def test_order_level_discount_still_applies_without_line_discounts(self):
+        """The long-standing shape: discount only on the order."""
+        self.assertEqual(convert.convert_nimbus_row(nimbus_row())[0]["Order Total"],
+                         "2798.20")
+
     def test_shipment_only_export_has_no_product_lines(self):
         """Some Nimbus exports are shipment-only: 76 columns, no line items."""
         row = {k: v for k, v in nimbus_row().items()
